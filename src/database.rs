@@ -169,7 +169,7 @@ impl Reader {
     /// Builds a query to find all entries in the database that have a filename matching the given pattern.
     ///
     /// Afterwards, use `Query::into_iter` to iterate over the items.
-    pub fn query(self, exact_regex: &Regex) -> Query {
+    pub fn query(self, exact_regex: Option<&Regex>) -> Query {
         Query {
             reader: self,
             exact_regex,
@@ -201,7 +201,7 @@ pub struct Query<'a, 'b> {
     reader: Reader,
 
     /// The pattern that file paths have to match.
-    exact_regex: &'a Regex,
+    exact_regex: Option<&'a Regex>,
 
     /// Only include the package with the given hash.
     hash: Option<String>,
@@ -228,8 +228,11 @@ impl<'a, 'b> Query<'a, 'b> {
     ///
     /// There is no guarantee about the order of the returned matches.
     pub fn run(self) -> Result<ReaderIter<'a, 'b>> {
+        // TODO allow empty pattern
+        let exact_regex = self.exact_regex.expect("pattern cannot be empty");
+
         let mut expr = regex_syntax::ast::parse::Parser::new()
-            .parse(self.exact_regex.as_str())
+            .parse(exact_regex.as_str())
             .expect("regex cannot be invalid");
         // replace the ^ anchor by a NUL byte, since each entry is of the form `METADATA\0PATH`
         // (so the NUL byte marks the start of the path).
@@ -294,7 +297,7 @@ pub struct ReaderIter<'a, 'b> {
     pattern: grep::regex::RegexMatcher,
     /// The raw pattern, as supplied to `find_iter`. This is used to verify matches, since `pattern` itself
     /// may produce false positives.
-    exact_pattern: &'a Regex,
+    exact_pattern: Option<&'a Regex>,
     /// Pattern that matches only package entries.
     package_entry_pattern: grep::regex::RegexMatcher,
     /// Pattern that the package name should match.
@@ -348,6 +351,8 @@ fn next_matching_line<M: Matcher<Error = NoError>>(
 impl<'a, 'b> ReaderIter<'a, 'b> {
     /// Reads input until `self.found` contains at least one entry or the end of the input has been reached.
     fn fill_buf(&mut self) -> Result<()> {
+        let exact_pattern = self.exact_pattern.expect("pattern cannot be empty");
+
         // the input is processed in blocks until we've found at least a single entry
         while self.found.is_empty() {
             let &mut ReaderIter {
@@ -449,7 +454,7 @@ impl<'a, 'b> ReaderIter<'a, 'b> {
                     .ok_or_else(|| Error::from(ErrorKind::EntryParse(entry.to_vec())))?;
 
                 // check for false positives
-                if !self.exact_pattern.is_match(&entry.path) {
+                if !exact_pattern.is_match(&entry.path) {
                     continue;
                 }
 

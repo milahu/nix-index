@@ -35,7 +35,7 @@ struct Args {
     /// Path of the nix-index database.
     database: PathBuf,
     /// The pattern to search for. This is always in regex syntax.
-    pattern: String,
+    pattern: Option<String>,
     group: bool,
     hash: Option<String>,
     package_pattern: Option<String>,
@@ -43,12 +43,17 @@ struct Args {
     only_toplevel: bool,
     color: bool,
     minimal: bool,
+    dump_database: bool,
 }
 
 /// The main function of this module: searches with the given options in the database.
 fn locate(args: &Args) -> Result<()> {
     // Build the regular expression matcher
-    let pattern = Regex::new(&args.pattern).chain_err(|| ErrorKind::Grep(args.pattern.clone()))?;
+    let pattern_option = if let Some(ref pat) = args.pattern {
+        Some(Regex::new(pat).chain_err(|| ErrorKind::Grep(pat.clone()))?)
+    } else {
+        None
+    };
     let package_pattern = if let Some(ref pat) = args.package_pattern {
         Some(Regex::new(pat).chain_err(|| ErrorKind::Grep(pat.clone()))?)
     } else {
@@ -57,15 +62,36 @@ fn locate(args: &Args) -> Result<()> {
 
     // Open the database
     let index_file = args.database.join("files");
-    let db = database::Reader::open(&index_file)
+    let mut db = database::Reader::open(&index_file)
         .chain_err(|| ErrorKind::ReadDatabase(index_file.clone()))?;
 
+    if args.dump_database {
+        db.dump().unwrap();
+        process::exit(0);
+    }
+
+    // TODO allow empty pattern
+    let pattern = match pattern_option {
+        Some(ref p) => p,
+        None => {
+            // similar output as clap error message
+            // but without colors or formatting
+            println!("error: the following required arguments were not provided:");
+            println!("  <PATTERN>");
+            println!("");
+            println!("Usage: nix-locate <PATTERN>");
+            println!("");
+            println!("For more information, try '--help'.");
+            process::exit(1);
+        }
+    };
+
     let results = db
-        .query(&pattern)
+        .query(pattern_option.as_ref())
         .package_pattern(package_pattern.as_ref())
         .hash(args.hash.clone())
         .run()
-        .chain_err(|| ErrorKind::Grep(args.pattern.clone()))?
+        .chain_err(|| ErrorKind::Grep(args.pattern.as_ref().unwrap_or(&String::from("")).clone()))?
         .filter(|v| {
             v.as_ref().ok().map_or(true, |v| {
                 let &(ref store_path, FileTreeEntry { ref path, ref node }) = v;
@@ -181,7 +207,7 @@ fn process_args(matches: Opts) -> result::Result<Args, clap::Error> {
     let args = Args {
         database: matches.database,
         group: !matches.no_group,
-        pattern: make_pattern(&pattern_arg, true),
+        pattern: pattern_arg.as_deref().map(|p| make_pattern(p, true)),
         package_pattern: package_arg.as_deref().map(|p| make_pattern(p, false)),
         hash: matches.hash,
         file_type: matches
@@ -190,6 +216,7 @@ fn process_args(matches: Opts) -> result::Result<Args, clap::Error> {
         only_toplevel: matches.top_level,
         color,
         minimal: matches.minimal,
+        dump_database: matches.dump_database,
     };
     Ok(args)
 }
@@ -237,7 +264,7 @@ fn cache_dir() -> &'static OsStr {
 struct Opts {
     /// Pattern for which to search
     // #[clap(name = "PATTERN")]
-    pattern: String,
+    pattern: Option<String>,
 
     /// Directory where the index is stored
     #[clap(short, long = "db", default_value_os = cache_dir(), env = "NIX_INDEX_DATABASE")]
@@ -293,6 +320,10 @@ struct Opts {
     /// store path are omitted. This is useful for scripts that use the output of nix-locate.
     #[clap(long)]
     minimal: bool,
+
+    /// Dump the contents of the database to stdout, for debugging.
+    #[clap(long)]
+    dump_database: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
